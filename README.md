@@ -1,1 +1,5 @@
-"# dl-2023-visual-grounding" 
+## Referencial Visual Grounding with CLIP
+### Deep Learning 2023, University of Trento
+```
+  python infer.py
+```
