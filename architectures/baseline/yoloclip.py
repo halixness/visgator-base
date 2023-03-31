@@ -33,7 +33,7 @@ class YOLOClip(torch.nn.Module):
             images:     Tensor(N, w, h, c)
         """
         results = self.YOLO(images)
-        return results.xyxy  # (N, top-K, xmin, ymin, xmax, ymax, conf, class, name)
+        return results.xyxy  # (N, top-K, xmin, ymin, xmax, ymax, conf, class)
     
 
     def forward(self, images, texts):
@@ -42,8 +42,8 @@ class YOLOClip(torch.nn.Module):
             images:     PillowImage
             texts:      Tensor(N, k, d)
         """
-        #      xmin    ymin    xmax   ymax  confidence  class    name
-        bounding_boxes = self.get_bounding_boxes(images) # (N, K, bbox)
+        #      xmin    ymin    xmax   ymax  confidence  class
+        bounding_boxes = self.get_bounding_boxes(images)
         
         PILToTensor = T.ToTensor()
         TensorToPIL = T.ToPILImage()
@@ -89,7 +89,6 @@ class YOLOClip(torch.nn.Module):
             text_features = self.CLIP.encode_text(text_inputs)
             text_features /= text_features.norm(dim=-1, keepdim=True)
 
-        # Pick the top 5 most similar labels for the image
         similarity = (100.0 * obj_features @ text_features.T).softmax(dim=-1)
 
         # For each caption, pick best bbox
@@ -97,6 +96,7 @@ class YOLOClip(torch.nn.Module):
         for i in range(len(texts)):
             idx = torch.argmax(similarity[:, i])
             results.append(identified_objs[idx][1])
+
             print(f"{texts[i]}: \t img_{idx} \t {similarity[idx, i]}")
 
         return results
