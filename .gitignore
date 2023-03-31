@@ -7,7 +7,7 @@ __pycache__/
 *.so
 
 # Distribution / packaging
-*.png
+img_*.png
 predictions/
 .Python
 env/
