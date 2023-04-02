@@ -4,4 +4,5 @@ regex
 tqdm
 torchvision
 pillow
+transformers
 git+https://github.com/openai/CLIP.git
