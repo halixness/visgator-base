@@ -76,6 +76,9 @@ class RefCocoDataset(data.Dataset[RefCocoBatchSample]):
         sample = self._samples[index]
         img = torchvision.io.read_image(str(sample.path))
 
+        # preventing 1 channel images => stick to RGB
+        if img.size(0) == 1: img = img.repeat(3, 1, 1)
+
         res = self._processor(images=img, return_tensors="pt", padding=True)
         image: Tensor = res["pixel_values"].squeeze(0)
 

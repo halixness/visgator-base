@@ -33,9 +33,10 @@ class CLIPDetector(torch.nn.Module):
 
         # Freezing params
         self.CLIP.requires_grad = False
+        self.logit_scale = torch.nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         
         self.bbox_proj = torch.nn.Linear(512 * 2, 4).type(self.CLIP.dtype).to(self.device)
-        self.activation = torch.nn.ReLU().type(self.CLIP.dtype).to(self.device)
+        self.activation = torch.nn.Sigmoid().type(self.CLIP.dtype).to(self.device)
 
 
     def position_encoding(self, n_positions, embedding_dim):
@@ -52,6 +53,7 @@ class CLIPDetector(torch.nn.Module):
         position_enc[1:, 1::2] = np.cos(position_enc[1:, 1::2]) # dim 2i+1
 
         return torch.from_numpy(position_enc).type(torch.FloatTensor)
+
 
     def contrastive_loss(self, similarity, i, j, tau = 1, dim=0):
         """ 
@@ -70,41 +72,69 @@ class CLIPDetector(torch.nn.Module):
             row[j] / (torch.sum(row) - row[j])
         )
     
-    def encode_captions(self, texts):
-        """
-            Batch of sentences -> batch of CLIP sent embeddings
-            texts:     List[String]
-        """
-        return torch.stack(
-            [self.CLIP.encode_text(clip.tokenize(t).to(self.device)) for t in texts]
-        ).to(self.device)[:, 0, :]
-    
 
-    def encode_image_caption(self, image, text):
-        """
-            Given an image and a caption, compute the bounding box and the img embedding (for contrastive loss)
-            image:     Tensor(c, h, w)
-            texts:     String
-        """
+    def inference(self, imgs, captions):
+        with torch.no_grad():
+            sents = torch.stack([clip.tokenize(s) for s in captions])[:,0,:]
 
-        # CLIP image features
-        image = image.type(self.CLIP.dtype)
-        img_features = self.CLIP.encode_image(image)[0]
-        img_features /= img_features.norm(dim=-1, keepdim=True)
+            image_features = self.CLIP.encode_image(imgs.to(self.device))
+            text_features = self.CLIP.encode_text(sents.to(self.device))
 
-        txt_features = self.CLIP.encode_text(
-            clip.tokenize(text).to(self.device)
-        )[0]
-        txt_features /= txt_features.norm(dim=-1, keepdim=True)
+            # normalized features
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True) # 16, 512
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True) # 16, 512
 
-        x = torch.cat((img_features, txt_features))
-        x = self.activation(
+            # 16, 4
+            x = torch.cat((image_features, text_features), dim = 1)
+            bboxes = self.activation(
+                self.bbox_proj(x)
+            )
+        
+            # Rescaling
+            rescaled_bboxes = torch.zeros_like(bboxes).to(self.device)
+            for i, bbox in enumerate(bboxes):
+                xmin, xmax, ymin, ymax = bbox # normalized bbox
+                xmin = (xmin * imgs[0].shape[2]).to(torch.int32)
+                xmax = (xmax * imgs[0].shape[2]).to(torch.int32)
+                ymin = (xmax * imgs[0].shape[1]).to(torch.int32)
+                ymax = (xmax * imgs[0].shape[1]).to(torch.int32)
+                rescaled_bboxes[i] = torch.Tensor([xmin, xmax, ymin, ymax]).to(self.device)
+            
+        return rescaled_bboxes
+
+
+    def forward(self, imgs, captions):
+        
+        sents = torch.stack([clip.tokenize(s) for s in captions])[:,0,:]
+
+        image_features = self.CLIP.encode_image(imgs.to(self.device))
+        text_features = self.CLIP.encode_text(sents.to(self.device))
+
+        # normalized features
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True) # 16, 512
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True) # 16, 512
+
+        # 16, 4
+        x = torch.cat((image_features, text_features), dim = 1)
+        bboxes = self.activation(
             self.bbox_proj(x)
         )
 
-        # Mask the input with the predicted bbox
-        xmin, xmax, ymin, ymax = x.type(torch.int16)
-        embedding = torch.zeros_like(image)
-        embedding[:, :, ymin:ymax, xmin:xmax] = image[:, :, ymin:ymax, xmin:xmax]
+        # 16, c, h, w
+        masked_imgs = torch.zeros_like(imgs).to(self.device)
+        for i, bbox in enumerate(bboxes):
+            xmin, xmax, ymin, ymax = bbox # normalized bbox
+            xmin = (xmin * imgs[0].shape[2]).to(torch.int32)
+            xmax = (xmax * imgs[0].shape[2]).to(torch.int32)
+            ymin = (xmax * imgs[0].shape[1]).to(torch.int32)
+            ymax = (xmax * imgs[0].shape[1]).to(torch.int32)
+            masked_imgs[i, :, ymin:ymax, xmin:xmax] = imgs[i, :, ymin:ymax, xmin:xmax]
 
-        return x, self.CLIP.encode_image(embedding)
+        masked_features = self.CLIP.encode_image(masked_imgs)
+
+        # cosine similarity as logits
+        logit_scale = self.logit_scale.exp()
+        logits_per_image = logit_scale * masked_features @ text_features.t()
+        logits_per_text = logit_scale * text_features @ masked_features.t()
+
+        return logits_per_image, logits_per_text

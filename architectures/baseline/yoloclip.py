@@ -9,6 +9,7 @@ import clip
 import torch
 import torchvision.transforms as T
 import matplotlib.pyplot as plt
+import numpy as np
 
 class YOLOClip(torch.nn.Module):
 
@@ -17,12 +18,17 @@ class YOLOClip(torch.nn.Module):
         clip_img_encoder='ViT-B/32', 
         yolo_repo='ultralytics/yolov5', 
         yolo_version='yolov5s', 
-        device=None
+        device=None,
+        CONF_THRESHOLD=.5
     ):
         super().__init__()
 
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+
+        self.CONF_THRESHOLD = CONF_THRESHOLD
 
         self.CLIP, self.clip_preprocess = clip.load(clip_img_encoder, self.device)
         self.YOLO = torch.hub.load(yolo_repo, yolo_version, pretrained=True, verbose=False).to(self.device)
@@ -32,71 +38,63 @@ class YOLOClip(torch.nn.Module):
             Get YOLO bounding boxes & labels
             images:     Tensor(N, w, h, c)
         """
-        results = self.YOLO(images)
-        return results.xyxy  # (N, top-K, xmin, ymin, xmax, ymax, conf, class)
+        # (N, top-K, xmin, ymin, xmax, ymax, conf, class)
+        return [self.YOLO(img).xyxy[0] for img in images]  
     
 
     def forward(self, images, texts):
         """
-            Given an image, extract objects and compute text scores
-            images:     PillowImage
-            texts:      Tensor(N, k, d)
+            From images, choose the YOLO-extracted bbox that best matches texts with CLIP score 
+            images:         [PillowImage]
+            texts:          [str]
+            
+            bbox_results:   [(xmin, xmax, ymin, ymax, confidence, val),(...),...]
         """
-        #      xmin    ymin    xmax   ymax  confidence  class
-        bounding_boxes = self.get_bounding_boxes(images)
-        
         PILToTensor = T.ToTensor()
         TensorToPIL = T.ToPILImage()
-        img = PILToTensor(images).to(self.device)
-        # img = torch.permute(img, (1, 2, 0)) # c, h, w => h, w, c
-        
-        identified_objs = []
-        
-        # Masked obj imgs
-        for i, detected in enumerate(bounding_boxes[0]):
 
-            # extract bounding box
-            xmin, ymin, xmax, ymax = detected[:4].int().tolist()
-            confidence = detected[4].double()
+        # YOLO bulk processing all images
+        #      xmin    ymin    xmax   ymax  confidence  class
+        yolo_images = [TensorToPIL(i) for i in images]
+        bounding_boxes = self.get_bounding_boxes(yolo_images)
+        bbox_results = []
 
-            # c, h, w
-            mask = torch.ones_like(img).to(self.device)            
-            mask[:, :, :] = 0
-            mask[:, ymin:ymax, xmin:xmax] = confidence
-
-            detection_img = torch.mul(img / 255, mask) * 255
-
-            # Pillow Img, bbox list
-            identified_objs.append((TensorToPIL(detection_img), detected[:4].int().tolist()))
-            plt.imsave(f"img_{i}.png", torch.permute(detection_img, (1,2,0)).cpu().numpy())
-            
-        # Extract CLIP scores
         with torch.no_grad():
+        
+            # For each image
+            for i, image in enumerate(images):
 
-            # Images
-            obj_features = []
-            for obj in identified_objs:
-                features = self.CLIP.encode_image(
-                    self.clip_preprocess(obj[0]).unsqueeze(0).to(self.device)
-                )
-                features /= features.norm(dim=-1, keepdim=True)
-                obj_features.append(features)
-                
-            obj_features = torch.cat(obj_features)
+                # For each bbox in img
+                objects = []
+                for j, detected in enumerate(bounding_boxes[i]):
 
-            # Text
-            text_inputs = torch.cat([clip.tokenize(t) for t in texts]).to(self.device)
-            text_features = self.CLIP.encode_text(text_inputs)
-            text_features /= text_features.norm(dim=-1, keepdim=True)
+                    # BBox & confidence
+                    xmin, ymin, xmax, ymax = detected[:4].int().tolist()
+                    confidence = detected[4].double()
 
-        similarity = (100.0 * obj_features @ text_features.T).softmax(dim=-1)
+                    if confidence > self.CONF_THRESHOLD:                            
+                        # Crop the img to get bbox data
+                        # c, h, w
+                        detected_img = image[:, ymin:ymax, xmin:xmax]
+                        objects.append(self.clip_preprocess(TensorToPIL(detected_img)).to(self.device))
 
-        # For each caption, pick best bbox
-        results = []
-        for i in range(len(texts)):
-            idx = torch.argmax(similarity[:, i])
-            results.append(identified_objs[idx][1])
+                # If any obj detected
+                if len(objects) > 0:
 
-            print(f"{texts[i]}: \t img_{idx} \t {similarity[idx, i]}")
+                    objects = torch.stack(objects).to(self.device)
+                    objects_features = self.CLIP.encode_image(objects) # (K, 512)
+            
+                    text_features = self.CLIP.encode_text(clip.tokenize(texts[i]).to(self.device)) # (1, 512)
 
-        return results
+                    # Compute bboxes-caption score and return the best one
+                    similarity = (100.0 * objects_features @ text_features.T)
+                    idx = torch.argmax(similarity).cpu().numpy()
+
+                    # First is the predicted one
+                    final_boxes = [bounding_boxes[i][idx]] + [b for i, b in enumerate(bounding_boxes[i]) if i != idx]
+                    bbox_results.append(final_boxes)
+
+                else:
+                    bbox_results.append(None)
+
+            return bbox_results
