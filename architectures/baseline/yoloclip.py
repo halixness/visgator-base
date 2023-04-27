@@ -90,8 +90,8 @@ class YOLOClip(torch.nn.Module):
                     similarity = (100.0 * objects_features @ text_features.T)
                     idx = torch.argmax(similarity).cpu().numpy()
 
-                    # First is the predicted one
-                    final_boxes = [bounding_boxes[i][idx]] + [b for i, b in enumerate(bounding_boxes[i]) if i != idx]
+                    # First is the predicted one, return also other yolo preds
+                    final_boxes = [bounding_boxes[i][idx]] + [b for j, b in enumerate(bounding_boxes[i]) if j != idx]
                     bbox_results.append(final_boxes)
 
                 else:

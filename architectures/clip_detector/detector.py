@@ -36,7 +36,7 @@ class CLIPDetector(torch.nn.Module):
         self.logit_scale = torch.nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         
         self.bbox_proj = torch.nn.Linear(512 * 2, 4).type(self.CLIP.dtype).to(self.device)
-        self.activation = torch.nn.Sigmoid().type(self.CLIP.dtype).to(self.device)
+        self.activation = torch.nn.ReLU().type(self.CLIP.dtype).to(self.device)
 
 
     def position_encoding(self, n_positions, embedding_dim):
@@ -105,12 +105,13 @@ class CLIPDetector(torch.nn.Module):
 
     def forward(self, imgs, captions):
         
-        sents = torch.stack([clip.tokenize(s) for s in captions])[:,0,:]
+        sents = torch.stack([clip.tokenize(s) for s in captions])[:,0,:].to(self.device)
+        preprocessed_imgs = torch.stack([self.clip_preprocess(self.TensorToPIL(i)) for i in imgs]).to(self.device)
 
-        image_features = self.CLIP.encode_image(imgs.to(self.device))
-        text_features = self.CLIP.encode_text(sents.to(self.device))
+        image_features = self.CLIP.encode_image(preprocessed_imgs)
+        text_features = self.CLIP.encode_text(sents)
 
-        # normalized features
+        # normalize inputs
         image_features = image_features / image_features.norm(dim=-1, keepdim=True) # 16, 512
         text_features = text_features / text_features.norm(dim=-1, keepdim=True) # 16, 512
 
@@ -119,8 +120,11 @@ class CLIPDetector(torch.nn.Module):
         bboxes = self.activation(
             self.bbox_proj(x)
         )
+        
+        return bboxes
 
         # 16, c, h, w
+        """
         masked_imgs = torch.zeros_like(imgs).to(self.device)
         for i, bbox in enumerate(bboxes):
             xmin, xmax, ymin, ymax = bbox # normalized bbox
@@ -138,3 +142,4 @@ class CLIPDetector(torch.nn.Module):
         logits_per_text = logit_scale * text_features @ masked_features.t()
 
         return logits_per_image, logits_per_text
+        """
