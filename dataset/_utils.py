@@ -9,6 +9,7 @@ from jaxtyping import Float
 from torch import Tensor
 from typing import List
 
+
 @dataclass(init=True, frozen=True)
 class RefCocoSample:
     path: Path
@@ -25,6 +26,6 @@ class RefCocoBatchSample:
 
 @dataclass(init=True, frozen=True)
 class RefCocoBatch:
-    images: Float[Tensor, "B C H W"]
+    images: List[Float[Tensor, "C H W"]]
     sentences: List[List[str]]
     bboxes: Float[Tensor, "B 4"]

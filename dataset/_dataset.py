@@ -9,7 +9,6 @@ from typing import Literal, List
 import numpy as np
 import torch
 import torchvision
-from torch import Tensor
 from torch.utils import data
 from transformers import CLIPProcessor
 
@@ -27,7 +26,6 @@ class RefCocoDataset(data.Dataset[RefCocoBatchSample]):
     ) -> None:
         super().__init__()
 
-        self._processor = CLIPProcessor.from_pretrained(config.preprocessing)
         self._negative_sentences = config.negative_sentences
         self._samples = self._get_samples(config, phase)
 
@@ -43,29 +41,40 @@ class RefCocoDataset(data.Dataset[RefCocoBatchSample]):
             refs = pickle.load(pf)
             instances = json.load(jf)
 
+        images = {}
+        for image in instances["images"]:
+            images[image["id"]] = images_path / image["file_name"]
+
         for ref in refs:
+            if ref["split"] != phase:
+                continue
+
             sentences = [sent["raw"] for sent in ref["sentences"]]
-            info[ref["image_id"]] = {"sentences": sentences}
+            if info.get(ref["ann_id"]) is not None:
+                info[ref["ann_id"]]["sentences"].append(sentences)
+            else:
+                info[ref["ann_id"]] = {
+                    "path": images[ref["image_id"]],
+                    "sentences": [sentences],
+                }
 
         for annotation in instances["annotations"]:
-            info[annotation["image_id"]]["bbox"] = annotation["bbox"]
-
-        for image in instances["images"]:
-            info[image["id"]]["path"] = images_path / image["file_name"]
+            if annotation["id"] in info:
+                info[annotation["id"]]["bbox"] = annotation["bbox"]
 
         samples = []
 
         for sample_info in info.values():
-            if ref["split"] != phase:
-                continue
+            path = sample_info["path"]
+            bbox = sample_info["bbox"]
+            for sent in sample_info["sentences"]:
+                sample = RefCocoSample(
+                    path=path,  # type: ignore
+                    bbox=bbox,
+                    sentences=sent,
+                )
 
-            sample = RefCocoSample(
-                path=sample_info["path"],  # type: ignore
-                bbox=sample_info["bbox"],
-                sentences=sample_info["sentences"],
-            )
-
-            samples.append(sample)
+                samples.append(sample)
 
         return samples
 
@@ -77,10 +86,8 @@ class RefCocoDataset(data.Dataset[RefCocoBatchSample]):
         img = torchvision.io.read_image(str(sample.path))
 
         # preventing 1 channel images => stick to RGB
-        if img.size(0) == 1: img = img.repeat(3, 1, 1)
-
-        res = self._processor(images=img, return_tensors="pt", padding=True)
-        image: Tensor = res["pixel_values"].squeeze(0)
+        if img.size(0) == 1:
+            img = img.repeat(3, 1, 1)
 
         bbox = torch.tensor(sample.bbox)
 
@@ -92,7 +99,7 @@ class RefCocoDataset(data.Dataset[RefCocoBatchSample]):
             sent = neg_sample.sentences[np.random.choice(len(sample.sentences), 1)[0]]
             sentences.append(sent)
 
-        return RefCocoBatchSample(image, sentences, bbox)
+        return RefCocoBatchSample(img, sentences, bbox)
 
     @staticmethod
     def batchify(
@@ -103,7 +110,7 @@ class RefCocoDataset(data.Dataset[RefCocoBatchSample]):
         bboxes = [sample.bbox for sample in batch]
 
         return RefCocoBatch(
-            images=torch.stack(images),
+            images=images,
             sentences=sentences,
             bboxes=torch.stack(bboxes),
         )
