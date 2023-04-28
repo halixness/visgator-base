@@ -1,22 +1,18 @@
-from architectures.baseline.yoloclip import YOLOClip
-import torch
-from PIL import Image
-from io import BytesIO
-from dataset import RefCocoBatch, RefCocoConfig, RefCocoDataset
-from pathlib import Path
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 from tqdm import tqdm
-
-import clip
-import torch.optim as optim
-import matplotlib.patches as patches
 import numpy as np
 import argparse 
-from clip_utils import get_iou
 
-# -------------------------------
+from dataset import RefCocoBatch, RefCocoConfig, RefCocoDataset
+from model.baseline.yoloclip import YOLOClip
+from util.metrics import get_iou
+from util.parallel import setup, cleanup 
 
+# TODO: set DataParallel
+
+print("[-] Loading the dataset...")
+
+# Args
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", default="baseline", type=str, help="Model to test (default: baseline)")
 parser.add_argument("--batch_size", default=16, type=int, help="Batch size")
@@ -25,8 +21,7 @@ parser.add_argument("--device", default="cuda", type=str, help="Device to use")
 
 args = parser.parse_args()
 
-# -------------------------------
-
+# Loading data
 cfg = RefCocoConfig({
     "path": args.dataset
 })
@@ -35,19 +30,22 @@ train_dataset = RefCocoDataset(config = cfg, phase = "train")
 test_dataset = RefCocoDataset(config = cfg, phase = "test")
 train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=RefCocoDataset.batchify)
 
-# -------------------------------
+print("[-] Loading the model...")
 
+# Loading model
 if args.model == "baseline":
     model = YOLOClip(device=args.device)
 else:
     raise Exception("No valid model selected.")
+
+print("[-] Starting the evaluation...")
 
 model_iou = []
 for batch in tqdm(train_dataloader):
     
     bboxes = model(batch.images, batch.sentences)
 
-    if bboxes.shape[0] == 0:
+    if len(bboxes) == 0:
         model_iou.append(0)  
     else:
         for i, obj in enumerate(bboxes):
